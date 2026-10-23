@@ -8,11 +8,14 @@ PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_ROOT="$PROJECT_DIR/output"
 STAGE_ROOT="$PROJECT_DIR/.work"
 VENV_DIR="$PROJECT_DIR/.venv"
-VERSION="0.9.0"
+TOOLS_DIR="$PROJECT_DIR/.tools"
+VERSION="1.0.0"
 ASGARD_BIN="$VENV_DIR/bin/asgard"
 ASGARD_TQDM_RUNNER="$PROJECT_DIR/asgard_tqdm.py"
 OPPO_OTA_BIN="$VENV_DIR/bin/oppo-ota"
 OPPO_OTA_INSTALL_URL="git+https://github.com/kestr31/OPPO-OTA-Downloader-CLI.git@20bea70fd4d637e67722eac3b8b4a8e2ecafcc2e"
+PAYLOAD_DUMPER_BIN="$TOOLS_DIR/payload-dumper-go"
+PAYLOAD_DUMPER_VERSION="2.1.0"
 
 SOURCE=""
 MODEL=""
@@ -82,7 +85,7 @@ Options:
   --model MODEL      Device model, for example SM-S938B or CPH2765
   --csc CSC          Samsung CSC, for example EUX
   --region REGION    Optional ColorOS firmware variant, for example EU
-  --mode MODE        One UI: apps or all
+  --mode MODE        Extraction mode for One UI or ColorOS: apps or all
   --asgard-source P  Path to the local Asgard source checkout (One UI only)
   -V, --version      Show the tool version
   -h, --help         Show this help
@@ -144,6 +147,11 @@ package_for() {
         apt:python-venv) printf 'python3-venv\n' ;;
         pacman:python-venv) printf 'python\n' ;;
         dnf:python-venv|zypper:python-venv) printf 'python3\n' ;;
+        apt:go) printf 'golang-go\n' ;;
+        dnf:go|zypper:go) printf 'go\n' ;;
+        pacman:go) printf 'go\n' ;;
+        apt:xz) printf 'xz-utils\n' ;;
+        dnf:xz|pacman:xz|zypper:xz) printf 'xz\n' ;;
         apt:erofs) printf 'erofsfuse\n' ;;
         dnf:erofs|pacman:erofs|zypper:erofs) printf 'erofs-utils\n' ;;
         *) printf '%s\n' "$dependency" ;;
@@ -299,6 +307,65 @@ ensure_coloros_dependencies() {
     if $verification_failed; then
         die "The ColorOS downloader dependencies could not be installed. Check the package-manager output above."
     fi
+}
+
+ensure_coloros_extraction_dependencies() {
+    local mode="$1"
+    local verification_failed=false
+    local command_name
+
+    MISSING_PACKAGES=()
+    check_command_dependency go go
+    check_command_dependency xz xz
+    check_command_dependency unzip unzip
+    check_command_dependency sudo sudo
+    check_command_dependency mount util-linux
+    check_command_dependency umount util-linux
+    check_command_dependency mountpoint util-linux
+    check_command_dependency dd coreutils
+    check_command_dependency od coreutils
+    check_command_dependency tr coreutils
+    check_command_dependency cp coreutils
+    check_command_dependency mkdir coreutils
+    check_command_dependency rm coreutils
+    check_command_dependency find findutils
+    check_command_dependency rsync rsync
+    if ! command -v fuse.erofs >/dev/null 2>&1 && ! command -v erofsfuse >/dev/null 2>&1; then
+        add_package_once erofs
+    fi
+
+    if [ "${#MISSING_PACKAGES[@]}" -gt 0 ]; then
+        install_missing_packages "${MISSING_PACKAGES[@]}"
+    else
+        info "All required ColorOS extraction tools are already installed"
+    fi
+
+    for command_name in go xz unzip sudo mount umount mountpoint dd od tr cp mkdir rm find rsync; do
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            printf '  - %s\n' "$command_name" >&2
+            verification_failed=true
+        fi
+    done
+    if ! command -v fuse.erofs >/dev/null 2>&1 && ! command -v erofsfuse >/dev/null 2>&1; then
+        printf '  - fuse.erofs or erofsfuse\n' >&2
+        verification_failed=true
+    fi
+    if $verification_failed; then
+        die "At least one ColorOS extraction dependency could not be installed. Check the package-manager output above."
+    fi
+
+    if [ "$mode" = "all" ] && ! command -v lpunpack >/dev/null 2>&1; then
+        install_lpunpack
+    fi
+}
+
+ensure_payload_dumper() {
+    if [ ! -x "$PAYLOAD_DUMPER_BIN" ]; then
+        info "Setting up the Android payload extractor"
+        mkdir -p "$TOOLS_DIR"
+        GOBIN="$TOOLS_DIR" go install "github.com/ssut/payload-dumper-go@$PAYLOAD_DUMPER_VERSION"
+    fi
+    "$PAYLOAD_DUMPER_BIN" -h >/dev/null
 }
 
 ensure_venv() {
@@ -489,9 +556,19 @@ prompt_for_oneui_input() {
     [[ "$CSC" =~ ^[A-Z0-9]{3}$ ]] || die "Invalid CSC: $CSC"
     printf 'Using model/CSC: %s / %s\n' "$MODEL" "$CSC"
 
+    prompt_for_extraction_mode
+}
+
+prompt_for_extraction_mode() {
+    local selection
+
     if [ -z "$MODE" ]; then
         printf '\nWhat should be extracted?\n'
-        printf '  1) System apps only: /system/app and /system/priv-app\n'
+        if [ "$SOURCE" = "coloros" ]; then
+            printf '  1) All preinstalled apps: system plus ColorOS app partitions\n'
+        else
+            printf '  1) System apps only: /system/app and /system/priv-app\n'
+        fi
         printf '  2) Everything: all available OS partitions\n'
         read -r -p "Choice [1]: " selection
         case "${selection:-1}" in
@@ -504,7 +581,6 @@ prompt_for_oneui_input() {
     MODE="${MODE,,}"
     [[ "$MODE" == "apps" || "$MODE" == "all" ]] || die "--mode must be apps or all."
 }
-
 
 prompt_for_coloros_input() {
     if [ -z "$MODEL" ]; then
@@ -525,6 +601,7 @@ prompt_for_coloros_input() {
     else
         printf 'Using ColorOS model: %s\n' "$MODEL"
     fi
+    prompt_for_extraction_mode
 }
 
 discover_coloros_profile() {
@@ -626,6 +703,61 @@ raise SystemExit("The official response contains no matching Full OTA packet. De
 PY
 }
 
+current_coloros_gate_metadata() {
+    "$VENV_DIR/bin/python" - "$MODEL" "$COLOROS_VARIANT" <<'PY'
+import json
+import sys
+from urllib.parse import urlencode
+from urllib.request import urlopen
+
+model, region = sys.argv[1:3]
+url = "https://roms.danielspringer.at/api/ota.php?" + urlencode(
+    {"model": model, "region": region, "latest": "1"}
+)
+try:
+    with urlopen(url, timeout=30) as response:
+        releases = json.load(response).get("releases", [])
+except Exception as error:
+    raise SystemExit(f"Current Full OTA catalog request failed: {error}")
+
+for release in releases:
+    if (
+        str(release.get("region", "")).upper() == region.upper()
+        and release.get("source_url")
+        and release.get("size")
+        and release.get("md5")
+        and release.get("version")
+    ):
+        print(
+            "\t".join(
+                str(release[field])
+                for field in ("source_url", "size", "md5", "version")
+            )
+        )
+        raise SystemExit(0)
+raise SystemExit("Current Full OTA catalog has no usable release for this variant.")
+PY
+}
+
+download_coloros_from_current_catalog() {
+    local destination="$1"
+    local metadata source_url size md5 version filename
+
+    if ! metadata="$(current_coloros_gate_metadata)"; then
+        return 1
+    fi
+    IFS=$'\t' read -r source_url size md5 version <<< "$metadata"
+    [ -n "$source_url" ] && [ -n "$size" ] && [ -n "$md5" ] && [ -n "$version" ] || return 1
+    version="${version//[^A-Za-z0-9._-]/_}"
+    filename="${MODEL}_${COLOROS_VARIANT}_${version}_full_ota.zip"
+
+    info "Downloading the current catalog Full OTA ($version) — progress follows"
+    "$OPPO_OTA_BIN" fetch "$source_url" \
+        --output "$destination/$filename" \
+        --size "$size" \
+        --md5 "$md5"
+}
+
 download_coloros_from_catalog() {
     local destination="$1"
 
@@ -673,8 +805,11 @@ download_coloros_full_ota() {
         fi
     fi
     if ! $downloaded; then
-        info "Official profile query was unavailable — using the catalog-verified Full OTA"
-        download_coloros_from_catalog "$destination"
+        info "Official profile query was unavailable — refreshing the catalog Full OTA gate"
+        download_coloros_from_current_catalog "$destination" || {
+            info "Current catalog gate was unavailable — using the selected catalog Full OTA"
+            download_coloros_from_catalog "$destination"
+        }
     fi
 
     if [ -f "$query_file" ]; then
@@ -683,6 +818,168 @@ download_coloros_full_ota() {
     printf 'model=%s\nvariant=%s\nquery_region=%s\nota_version=%s\ncoloros_major=%s\n' \
         "$MODEL" "$COLOROS_VARIANT" "$COLOROS_QUERY_REGION" "$COLOROS_OTA_VERSION" "$COLOROS_MAJOR" \
         > "$destination/coloros-profile.txt"
+}
+
+coloros_archive() {
+    local destination="$1"
+
+    find "$destination" -maxdepth 1 -type f \
+        \( -iname '*.zip' -o -iname '*.ozip' -o -iname '*.ofp' -o -iname '*.ops' \) \
+        -print -quit
+}
+
+require_coloros_payload_zip() {
+    local archive="$1"
+
+    if ! unzip -Z1 "$archive" 2>/dev/null | grep -Eq '(^|/)payload\.bin$'; then
+        die "Unsupported ColorOS archive: $(basename "$archive"). Extraction requires an unencrypted Full OTA ZIP containing payload.bin; encrypted OZIP, OFP, and OPS packages are not decrypted automatically."
+    fi
+}
+
+coloros_system_partition() {
+    local archive="$1"
+    local partition_list
+
+    partition_list="$("$PAYLOAD_DUMPER_BIN" -m -l "$archive")"
+    printf '%s\n' "$partition_list" | awk -F: '$1 == "system" || $1 == "system_a" || $1 == "system_b" { print $1; exit }'
+}
+
+coloros_app_partitions() {
+    local archive="$1"
+    local partition_list
+
+    partition_list="$("$PAYLOAD_DUMPER_BIN" -m -l "$archive")"
+    printf '%s\n' "$partition_list" | awk -F: '
+        $1 == "system" || $1 == "system_a" || $1 == "system_b" ||
+        $1 == "system_ext" || $1 == "system_ext_a" || $1 == "system_ext_b" ||
+        $1 == "product" || $1 == "product_a" || $1 == "product_b" ||
+        $1 == "vendor" || $1 == "vendor_a" || $1 == "vendor_b" ||
+        $1 == "odm" || $1 == "odm_a" || $1 == "odm_b" ||
+        $1 == "preload" || $1 ~ /^my_/ || $1 ~ /^oplus_/ {
+            print $1
+        }
+    '
+}
+
+copy_apps_from_coloros_partition() {
+    local image="$1"
+    local partition="$2"
+    local target="$3"
+    local fs source relative destination
+
+    [[ "$partition" =~ ^[A-Za-z0-9_.-]+$ ]] || die "Unsafe ColorOS partition name: $partition"
+    fs="$(filesystem_type "$image")"
+    if [ "$fs" = "unknown" ]; then
+        info "Skipping $partition; its filesystem cannot be mounted automatically"
+        return 0
+    fi
+    mount_image "$image"
+    info "Scanning $partition for preinstalled apps"
+    while IFS= read -r -d '' source; do
+        relative="${source#"$MOUNT_DIR"/}"
+        destination="$target/apps/$partition/$relative"
+        mkdir -p "$destination"
+        info "Copying /$relative from $partition — progress follows"
+        if $MOUNTED_AS_USER; then
+            rsync -a --human-readable --info=progress2,name0 "$source/" "$destination/"
+        else
+            sudo rsync -a --human-readable --info=progress2,name0 "$source/" "$destination/"
+            sudo chown -hR "$(id -u):$(id -g)" "$target/apps/$partition"
+        fi
+    done < <(find "$MOUNT_DIR" -type d \( -name app -o -name priv-app \) -print0)
+    unmount_image
+}
+
+copy_coloros_filesystems() {
+    local images="$1"
+    local destination="$2"
+    local stage="$3"
+    local image name partition fs
+
+    while IFS= read -r -d '' image; do
+        name="$(basename "${image%.img}")"
+        partition="$(normalise_slot_name "$name")"
+        case "$partition" in
+            system|vendor|product|system_ext|odm|vendor_dlkm|odm_dlkm|system_dlkm)
+                [ -f "$stage/.coloros-${partition}-complete" ] && continue
+                fs="$(filesystem_type "$image")"
+                if [ "$fs" = "unknown" ]; then
+                    info "Keeping raw $name.img; its filesystem cannot be mounted automatically"
+                    continue
+                fi
+                copy_partition "$image" "$partition" "$destination/$partition"
+                touch "$stage/.coloros-${partition}-complete"
+                ;;
+            *) ;;
+        esac
+    done < <(find "$images" -maxdepth 1 -type f -name '*.img' -print0)
+}
+
+extract_coloros_full_ota() {
+    local stage="$1"
+    local destination="$2"
+    local archive images partition image super
+
+    archive="$(coloros_archive "$destination")"
+    [ -n "$archive" ] || die "No ColorOS OTA archive was found in $destination."
+    require_coloros_payload_zip "$archive"
+    images="$stage/images"
+    mkdir -p "$images" "$destination/images"
+
+    if [ "$MODE" = "apps" ]; then
+        local -a app_partitions=()
+        local app_partition_csv
+        mapfile -t app_partitions < <(coloros_app_partitions "$archive")
+        [ "${#app_partitions[@]}" -gt 0 ] || die "The ColorOS payload contains no app-capable OS partitions."
+        if [ -f "$stage/.coloros-preinstalled-apps-complete" ] \
+            && [ -d "$destination/apps" ] \
+            && [ -d "$destination/system/system/app" ] \
+            && [ -d "$destination/system/system/priv-app" ]; then
+            info "Using the already extracted ColorOS preinstalled apps"
+            return 0
+        fi
+        app_partition_csv="$(IFS=,; printf '%s' "${app_partitions[*]}")"
+        if [ ! -f "$stage/.coloros-app-images-complete" ]; then
+            info "Extracting all app-capable ColorOS partitions — progress follows"
+            "$PAYLOAD_DUMPER_BIN" -p "$app_partition_csv" -o "$images" "$archive"
+            touch "$stage/.coloros-app-images-complete"
+        else
+            info "Using the already extracted ColorOS app partitions"
+        fi
+        for partition in "${app_partitions[@]}"; do
+            image="$images/$partition.img"
+            [ -f "$image" ] || die "The payload extractor did not produce $partition.img."
+            [ -f "$stage/.coloros-${partition}-apps-complete" ] && continue
+            copy_apps_from_coloros_partition "$image" "$partition" "$destination"
+            touch "$stage/.coloros-${partition}-apps-complete"
+        done
+        partition="$(coloros_system_partition "$archive")"
+        [ -n "$partition" ] || die "The ColorOS payload does not contain a system partition."
+        image="$images/$partition.img"
+        if [ ! -f "$stage/.coloros-system-layout-complete" ]; then
+            copy_apps_from_system "$image" "$destination"
+            touch "$stage/.coloros-system-layout-complete"
+        fi
+        touch "$stage/.coloros-preinstalled-apps-complete"
+        return 0
+    fi
+
+    if [ ! -f "$stage/.coloros-images-complete" ]; then
+        info "Extracting all partitions from the Full OTA — progress follows"
+        "$PAYLOAD_DUMPER_BIN" -o "$images" "$archive"
+        touch "$stage/.coloros-images-complete"
+    else
+        info "Using the already extracted ColorOS partition images"
+    fi
+    super="$(find "$images" -maxdepth 1 -type f -name 'super.img' -print -quit)"
+    if [ -n "$super" ] && [ ! -f "$stage/.coloros-super-complete" ]; then
+        info "Splitting super.img into logical partitions"
+        lpunpack "$super" "$images"
+        touch "$stage/.coloros-super-complete"
+    fi
+    find "$images" -maxdepth 1 -type f -name '*.img' -exec cp -a {} "$destination/images/" \;
+    copy_coloros_filesystems "$images" "$destination" "$stage"
+    touch "$stage/.coloros-all-complete"
 }
 
 filesystem_type() {
@@ -938,7 +1235,9 @@ main() {
     else
         prompt_for_coloros_input
         ensure_coloros_dependencies
+        ensure_coloros_extraction_dependencies "$MODE"
         ensure_oppo_downloader
+        ensure_payload_dumper
         discover_coloros_profile
 
         destination="$OUTPUT_ROOT/coloros/${MODEL}_${COLOROS_VARIANT}"
@@ -946,7 +1245,13 @@ main() {
         stage="$STAGE_DIR"
         info "ColorOS Full OTA: $MODEL / $COLOROS_VARIANT"
         download_coloros_full_ota "$stage" "$destination"
-        info "Done. The verified Full OTA is available at: $destination"
+        extract_coloros_full_ota "$stage" "$destination"
+        if [ "$MODE" = "apps" ]; then
+            info "Done. System APKs are available at: $destination/system/system/app and $destination/system/system/priv-app"
+            info "All ColorOS preinstalled-app directories are available at: $destination/apps"
+        else
+            info "Done. Complete filesystems and raw images are available at: $destination"
+        fi
     fi
     FINISHED=true
 }

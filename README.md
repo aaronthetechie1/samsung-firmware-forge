@@ -39,9 +39,11 @@ lists the Full OTA profiles it finds and asks you to choose one.
 
 Only packages explicitly marked as **Full OTA** are accepted; incremental and
 delta packages are rejected during profile selection. The script first queries
-the official OPPO endpoint. If that endpoint rejects the catalog profile, the
-same selected Full OTA is downloaded from its catalog URL with the published
-size and MD5 checksum verified.
+the official OPPO endpoint. If that endpoint rejects the catalog profile, it
+requests a current OPPO `downloadCheck` gate URL for the selected variant from
+a public Full-OTA catalog, then verifies the published size and MD5 checksum.
+That catalog can offer a newer or older Full OTA than the initially displayed
+profile; the exact fallback version is printed before download.
 
 The archive, checksum, query response, and selected profile are written to:
 
@@ -49,9 +51,41 @@ The archive, checksum, query response, and selected profile are written to:
 output/coloros/<MODEL>_<VARIANT>/
 ```
 
-The ColorOS path currently downloads and verifies the complete OTA archive. It
-does not attempt a generic APK extraction because ColorOS packages can use
-incompatible ZIP, OZIP, OFP, OPS, or payload formats. It never flashes a device.
+## ColorOS extraction modes
+
+After choosing the model and variant, choose the same extraction mode as for
+One UI:
+
+- **`apps`** (default) extracts every app-capable OS partition: `system`,
+  `system_ext`, `product`, `vendor`, `odm`, `preload`, and detected `my_*` or
+  `oplus_*` partitions. The familiar system directories remain at:
+
+  ```text
+  output/coloros/<MODEL>_<VARIANT>/system/system/app/
+  output/coloros/<MODEL>_<VARIANT>/system/system/priv-app/
+  ```
+
+  All app and `priv-app` directories, including ColorOS and HeyTap apps from
+  manufacturer partitions such as `my_product` and `my_heytap`, are preserved
+  under their original partition-relative paths:
+
+  ```text
+  output/coloros/<MODEL>_<VARIANT>/apps/<PARTITION>/...
+  ```
+
+- **`all`** extracts every partition image from `payload.bin`, splits
+  `super.img` when present, keeps the raw images under
+  `output/coloros/<MODEL>_<VARIANT>/images/`, and mounts the supported OS
+  filesystems (`system`, `product`, `vendor`, `system_ext`, `odm`, and
+  `*_dlkm`) into matching directories.
+
+This requires a regular, unencrypted Full OTA ZIP containing `payload.bin`.
+The script uses the pinned
+[payload-dumper-go](https://github.com/ssut/payload-dumper-go) release to
+extract it, including current BBK/OPPO Zstandard-compressed payloads.
+Encrypted `.ozip`, `.ofp`, and `.ops` packages are not decrypted automatically;
+the script stops with an explicit message and preserves the downloaded archive.
+It never flashes a device.
 
 ## Requirements and automatic setup
 
@@ -72,7 +106,10 @@ FUSE tool (`erofsfuse` on Debian/Ubuntu or `erofs-utils` on other supported
 systems).
 
 For the ColorOS path, it checks Python with `venv` and `git`, then installs the
-pinned OPPO OTA Downloader CLI revision inside the project-local `.venv`.
+pinned OPPO OTA Downloader CLI revision inside the project-local `.venv`. It
+also installs Go, `xz`, archive and filesystem tools when needed, and builds
+the pinned `payload-dumper-go` extractor in the project-local `.tools/`
+directory.
 
 For `all` mode, the script also attempts to install Android utilities.
 `lpunpack` is not available from every distribution repository; if it remains
@@ -115,7 +152,8 @@ For non-interactive execution:
 ```bash
 ./firmware-extract.sh --source oneui --model SM-S938B --csc EUX --mode apps
 ./firmware-extract.sh --source oneui --model SM-S938B --csc EUX --mode all
-./firmware-extract.sh --source coloros --model CPH2765 --region EU
+./firmware-extract.sh --source coloros --model CPH2765 --region EU --mode apps
+./firmware-extract.sh --source coloros --model CPH2765 --region EU --mode all
 ./firmware-extract.sh --version
 ```
 
@@ -142,3 +180,7 @@ project contributors.
 ColorOS Full OTA discovery and download are powered by
 [OPPO OTA Downloader CLI](https://github.com/kestr31/OPPO-OTA-Downloader-CLI)
 by [kestr31](https://github.com/kestr31), distributed under GPL-3.0-only.
+
+ColorOS payload extraction uses
+[payload-dumper-go](https://github.com/ssut/payload-dumper-go) by
+[ssut](https://github.com/ssut), distributed under Apache-2.0.
