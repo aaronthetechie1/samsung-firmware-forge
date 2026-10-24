@@ -111,10 +111,11 @@ also installs Go, `xz`, archive and filesystem tools when needed, and builds
 the pinned `payload-dumper-go` extractor in the project-local `.tools/`
 directory.
 
-For `all` mode, the script also attempts to install Android utilities.
-`lpunpack` is not available from every distribution repository; if it remains
-missing, only `all` mode stops with an actionable message. `apps` mode works
-without it.
+When an archive actually contains `super.img`, the script attempts to install
+Android Logical Partition Tools for `lpunpack`. Some distributions do not ship
+that binary; only firmware that needs its `super.img` split stops with an
+actionable message. Ordinary payload-based ColorOS Full OTAs do not need
+`lpunpack`.
 
 Automatic installation requires a supported package manager and either `sudo`
 or a root shell. To install the common dependencies yourself on Ubuntu/Debian:

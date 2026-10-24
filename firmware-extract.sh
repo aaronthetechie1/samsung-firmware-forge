@@ -224,7 +224,11 @@ install_lpunpack() {
             run_as_root zypper --non-interactive install android-tools || true
             ;;
     esac
-    command -v lpunpack >/dev/null 2>&1 || die "lpunpack could not be installed automatically with $PACKAGE_MANAGER. Install Android Logical Partition Tools manually and run the script again. Apps mode works without lpunpack."
+    command -v lpunpack >/dev/null 2>&1 || die "lpunpack could not be installed automatically with $PACKAGE_MANAGER. This firmware contains super.img, so install Android Logical Partition Tools manually and run the script again."
+}
+
+ensure_lpunpack() {
+    command -v lpunpack >/dev/null 2>&1 || install_lpunpack
 }
 
 ensure_dependencies() {
@@ -280,9 +284,6 @@ ensure_dependencies() {
         die "At least one dependency could not be installed. Check the package-manager output above."
     fi
 
-    if [ "$mode" = "all" ] && ! command -v lpunpack >/dev/null 2>&1; then
-        install_lpunpack
-    fi
 }
 
 ensure_coloros_dependencies() {
@@ -354,9 +355,6 @@ ensure_coloros_extraction_dependencies() {
         die "At least one ColorOS extraction dependency could not be installed. Check the package-manager output above."
     fi
 
-    if [ "$mode" = "all" ] && ! command -v lpunpack >/dev/null 2>&1; then
-        install_lpunpack
-    fi
 }
 
 ensure_payload_dumper() {
@@ -974,6 +972,7 @@ extract_coloros_full_ota() {
     super="$(find "$images" -maxdepth 1 -type f -name 'super.img' -print -quit)"
     if [ -n "$super" ] && [ ! -f "$stage/.coloros-super-complete" ]; then
         info "Splitting super.img into logical partitions"
+        ensure_lpunpack
         lpunpack "$super" "$images"
         touch "$stage/.coloros-super-complete"
     fi
@@ -1185,6 +1184,7 @@ extract_all() {
     super="$(find "$ap_dir" -maxdepth 1 -type f -name 'super.img' -print -quit)"
     if [ -n "$super" ]; then
         info "Splitting super.img into logical partitions"
+        ensure_lpunpack
         lpunpack "$super" "$stage/images"
     else
         find "$ap_dir" -maxdepth 1 -type f -name '*.img' -exec cp -a {} "$stage/images/" \;
