@@ -323,6 +323,7 @@ ensure_coloros_extraction_dependencies() {
     check_command_dependency mount util-linux
     check_command_dependency umount util-linux
     check_command_dependency mountpoint util-linux
+    check_command_dependency script util-linux
     check_command_dependency dd coreutils
     check_command_dependency od coreutils
     check_command_dependency tr coreutils
@@ -341,7 +342,7 @@ ensure_coloros_extraction_dependencies() {
         info "All required ColorOS extraction tools are already installed"
     fi
 
-    for command_name in go xz unzip sudo mount umount mountpoint dd od tr cp mkdir rm find rsync; do
+    for command_name in go xz unzip sudo mount umount mountpoint script dd od tr cp mkdir rm find rsync; do
         if ! command -v "$command_name" >/dev/null 2>&1; then
             printf '  - %s\n' "$command_name" >&2
             verification_failed=true
@@ -380,6 +381,17 @@ ensure_oppo_downloader() {
         "$VENV_DIR/bin/python" -m pip install "$OPPO_OTA_INSTALL_URL"
     fi
     "$OPPO_OTA_BIN" --version >/dev/null
+}
+
+run_oppo_download() {
+    local command_line
+
+    printf -v command_line '%q ' "$OPPO_OTA_BIN" "$@"
+    if command -v script >/dev/null 2>&1; then
+        script -q -e -c "$command_line" /dev/null
+    else
+        "$OPPO_OTA_BIN" "$@"
+    fi
 }
 
 find_asgard_source() {
@@ -750,7 +762,7 @@ download_coloros_from_current_catalog() {
     filename="${MODEL}_${COLOROS_VARIANT}_${version}_full_ota.zip"
 
     info "Downloading the current catalog Full OTA ($version) — progress follows"
-    "$OPPO_OTA_BIN" fetch "$source_url" \
+    run_oppo_download fetch "$source_url" \
         --output "$destination/$filename" \
         --size "$size" \
         --md5 "$md5"
@@ -768,7 +780,7 @@ download_coloros_from_catalog() {
     esac
 
     info "Downloading the catalog-verified Full OTA — progress follows"
-    "$OPPO_OTA_BIN" fetch "$COLOROS_DOWNLOAD_URL" \
+    run_oppo_download fetch "$COLOROS_DOWNLOAD_URL" \
         --output "$destination/$COLOROS_FILENAME" \
         --size "$COLOROS_DOWNLOAD_SIZE" \
         --md5 "$COLOROS_DOWNLOAD_MD5"
@@ -797,7 +809,7 @@ download_coloros_full_ota() {
         component="$(verify_coloros_full_packet "$query_file" || true)"
         if [ -n "$component" ]; then
             info "Downloading the verified Full OTA — progress follows"
-            "$OPPO_OTA_BIN" "${query_args[@]}" --save "$query_file" --download \
+            run_oppo_download "${query_args[@]}" --save "$query_file" --download \
                 --component "$component" --output-dir "$destination"
             downloaded=true
         fi

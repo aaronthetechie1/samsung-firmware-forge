@@ -43,7 +43,9 @@ the official OPPO endpoint. If that endpoint rejects the catalog profile, it
 requests a current OPPO `downloadCheck` gate URL for the selected variant from
 a public Full-OTA catalog, then verifies the published size and MD5 checksum.
 That catalog can offer a newer or older Full OTA than the initially displayed
-profile; the exact fallback version is printed before download.
+profile; the exact fallback version is printed before download. Downloads run
+inside a pseudo-terminal so the downloader's existing progress bar refreshes in
+place instead of printing one line per percentage update.
 
 The archive, checksum, query response, and selected profile are written to:
 
