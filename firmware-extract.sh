@@ -206,9 +206,10 @@ install_missing_packages() {
     esac
 }
 
-install_lpunpack() {
+install_android_image_tools() {
+    local required_tool="$1"
     detect_package_manager
-    info "Installing Android tools required by all mode"
+    info "Installing Android tools required by all mode ($required_tool)"
     case "$PACKAGE_MANAGER" in
         apt)
             run_as_root apt-get update
@@ -224,11 +225,39 @@ install_lpunpack() {
             run_as_root zypper --non-interactive install android-tools || true
             ;;
     esac
-    command -v lpunpack >/dev/null 2>&1 || die "lpunpack could not be installed automatically with $PACKAGE_MANAGER. This firmware contains super.img, so install Android Logical Partition Tools manually and run the script again."
 }
 
 ensure_lpunpack() {
-    command -v lpunpack >/dev/null 2>&1 || install_lpunpack
+    if ! command -v lpunpack >/dev/null 2>&1; then
+        install_android_image_tools lpunpack
+        command -v lpunpack >/dev/null 2>&1 || die "lpunpack could not be installed automatically with $PACKAGE_MANAGER. This firmware contains super.img, so install Android Logical Partition Tools manually and run the script again."
+    fi
+}
+
+ensure_simg2img() {
+    if ! command -v simg2img >/dev/null 2>&1; then
+        install_android_image_tools simg2img
+        command -v simg2img >/dev/null 2>&1 || die "simg2img could not be installed automatically with $PACKAGE_MANAGER. Install android-sdk-libsparse-utils or android-tools manually and run the script again."
+    fi
+}
+
+is_sparse_image() {
+    local image="$1"
+    local magic
+    magic="$(dd if="$image" bs=1 count=4 status=none | od -An -tx1 | tr -d ' \n')"
+    [ "$magic" = "3aff26ed" ]
+}
+
+unsparse_image_if_needed() {
+    local image="$1"
+    local raw_tmp
+    if is_sparse_image "$image"; then
+        ensure_simg2img
+        info "Converting Android sparse image $(basename "$image") to raw image"
+        raw_tmp="${image}.raw"
+        simg2img "$image" "$raw_tmp"
+        mv -f "$raw_tmp" "$image"
+    fi
 }
 
 ensure_dependencies() {
@@ -1177,14 +1206,18 @@ extract_all() {
     fi
     [ -n "$zip" ] || die "Asgard did not produce a decrypted ZIP file."
 
-    info "Unpacking the AP archive"
+    info "Unpacking the AP and CSC archives"
     unzip -q -o "$zip" -d "$stage/ap"
     ap_dir="$stage/ap/unpacked-ap"
     mkdir -p "$ap_dir"
-    local ap_tar
+    local ap_tar csc_tar
     ap_tar="$(find "$stage/ap" -maxdepth 1 -type f -name 'AP_*.tar.md5' -print -quit)"
     [ -n "$ap_tar" ] || die "AP_*.tar.md5 was not found in the firmware ZIP."
     tar -xf "$ap_tar" -C "$ap_dir"
+    csc_tar="$(find "$stage/ap" -maxdepth 1 -type f -name 'CSC_*.tar.md5' -print -quit)"
+    if [ -n "$csc_tar" ]; then
+        tar -xf "$csc_tar" -C "$ap_dir" --wildcards '*.img*' 2>/dev/null || tar -xf "$csc_tar" -C "$ap_dir" || true
+    fi
 
     while IFS= read -r -d '' image; do
         lz4 -d -f "$image" "${image%.lz4}"
@@ -1192,6 +1225,9 @@ extract_all() {
     while IFS= read -r -d '' image; do
         mv -f "$image" "${image%.ext4}"
     done < <(find "$ap_dir" -type f -name '*.img.ext4' -print0)
+    while IFS= read -r -d '' image; do
+        unsparse_image_if_needed "$image"
+    done < <(find "$ap_dir" -maxdepth 1 -type f -name '*.img' -print0)
 
     super="$(find "$ap_dir" -maxdepth 1 -type f -name 'super.img' -print -quit)"
     if [ -n "$super" ]; then
